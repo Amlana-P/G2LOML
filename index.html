@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Leave Optimizer – Final Correct DP (v2)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+body{font-family:system-ui;background:#f4f6f8;margin:0}
+header{background:#0f172a;color:#fff;padding:1rem}
+main{max-width:1000px;margin:2rem auto;background:#fff;padding:2rem;border-radius:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin-bottom:1rem}
+label{font-weight:600;font-size:.9rem}
+input,button{padding:.6rem;border-radius:8px;border:1px solid #ccc;width:100%}
+button{background:#2563eb;color:#fff;border:none;cursor:pointer}
+table{width:100%;border-collapse:collapse;margin-top:1.5rem}
+th,td{border:1px solid #ddd;padding:.5rem;text-align:center}
+th{background:#f1f5f9}
+.note{background:#ecfeff;padding:1rem;border-radius:8px;margin-top:1rem}
+</style>
+</head>
+<body>
+<header>
+<h1>Holiday Leave Optimizer</h1>
+<p>Correct DP with hard block termination + window maximization</p>
+</header>
+<main>
+<h2>Holiday CSV</h2>
+<input type="file" id="csvFile" accept=".csv" />
+<h2 style="margin-top:1.5rem">Settings</h2>
+<div class="grid">
+  <div><label>Year</label><input id="year" type="number" value="2026" /></div>
+  <div><label>Casual Leaves</label><input id="casual" type="number" value="6" /></div>
+  <div><label>Paid Leaves</label><input id="paid" type="number" value="12" /></div>
+  <div><label>Min Block Days</label><input id="minBlock" type="number" value="3" /></div>
+</div>
+<button id="runBtn">Optimize</button>
+<div id="output"></div>
+<div class="note">
+✔ Working day without leave ALWAYS breaks block<br>
+✔ Holidays cannot jump working days<br>
+✔ Each block is maximized (tries to reach 7 days)<br>
+</div>
+</main>
+<script>
+function parseCSV(text){
+  return text.split('\n').slice(1)
+    .map(r=>r.split(',')[0])
+    .filter(Boolean)
+    .map(d=>new Date(d.trim()).toDateString())
+}
+function isWeekend(d){return d.getDay()===0||d.getDay()===6}
+
+// Score favors longer contiguous blocks up to 7
+function scoreBlock(len){
+  if(len < 3) return -1e9      // hard reject small blocks
+  return len >= 7 ? 1000 + len : len * len          // quadratic reward favors long blocks
+}
+
+
+function better(a,b){
+  if(a.score!==b.score) return a.score>b.score
+  if(a.paid!==b.paid) return a.paid<b.paid
+  return a.casual<b.casual
+}
+
+function run(){
+  const file=csvFile.files[0]
+  if(!file) return alert("Upload CSV")
+  const Y=+year.value,C=+casual.value,P=+paid.value,minB=+minBlock.value
+
+  const reader=new FileReader()
+  reader.onload=()=>{
+    const holidaySet=new Set(parseCSV(reader.result))
+    const days=[]
+    for(let d=new Date(Y,0,1);d<=new Date(Y,11,31);d.setDate(d.getDate()+1)) days.push(new Date(d))
+
+    const memo=new Map(),choice=new Map()
+    const key=(i,c,p,k,o,len)=>`${i}|${c}|${p}|${k}|${o}|${len}`
+
+    function dp(i,c,p,k,o,len){
+      if(i>=days.length) return {score:o?scoreBlock(len):0,paid:0,casual:0}
+      const m=key(i,c,p,k,o,len)
+      if(memo.has(m)) return memo.get(m)
+
+      const day=days[i]
+      const isHoliday=holidaySet.has(day.toDateString())||isWeekend(day)
+      let best={score:-1e9,paid:1e9,casual:1e9},pick=null
+
+      // WORKING DAY
+      if(!isHoliday){
+        // take casual
+        if(c>0&&k<7){
+          const r=dp(i+1,c-1,p,k+1,1,len+1)
+          const cand={score:r.score,paid:r.paid,casual:r.casual+1}
+          if(better(cand,best)){best=cand;pick={t:'casual'}}
+        }
+        // take paid
+        if(p>0&&k<7){
+          const r=dp(i+1,c,p-1,k+1,1,len+1)
+          const cand={score:r.score,paid:r.paid+1,casual:r.casual}
+          if(better(cand,best)){best=cand;pick={t:'paid'}}
+        }
+        // working day without leave = hard break
+        const r = dp(i+1, c, p, 0, 0, 0)
+        const base = {
+          score: (o ? scoreBlock(len) : 0) + r.score,
+          paid: r.paid,
+          casual: r.casual
+        }
+
+        if(better(base,best)){best=base;pick={t:'work'}}
+      }
+
+      // HOLIDAY / WEEKEND
+      if(isHoliday){
+        // if already in a block → extend it
+        if(o){
+          const r = dp(i+1, c, p, k, 1, len+1)
+          const cand = {score:r.score, paid:r.paid, casual:r.casual}
+          if(better(cand, best)){ best=cand; pick={t:'holiday'} }
+        }
+        // if not in block → can start a block with a holiday
+        else{
+          const r = dp(i+1, c, p, 0, 1, 1)
+          const cand = {score:r.score, paid:r.paid, casual:r.casual}
+          if(better(cand, best)){ best=cand; pick={t:'holiday'} }
+        }
+      }
+
+
+      memo.set(m,best);choice.set(m,pick);return best
+    }
+
+    dp(0,C,P,0,0,0)
+
+    let i=0,c=C,p=P,k=0,o=0,len=0
+    const used=[]
+    while(i<days.length){
+      const ch=choice.get(key(i,c,p,k,o,len))
+      if(!ch){i++;k=0;o=0;len=0;continue}
+      const d=days[i]
+      if(ch.t==='holiday'){used.push({d,type:'Holiday'});i++;o=1;len++;k=0}
+      else if(ch.t==='casual'){used.push({d,type:'Casual'});c--;i++;o=1;len++;k++}
+      else if(ch.t==='paid'){used.push({d,type:'Paid'});p--;i++;o=1;len++;k++}
+      else{ i++;k=0;o=0;len=0 }
+    }
+
+    // build blocks strictly contiguous
+    const blocks=[]
+    let b=null
+    for(const cur of used){
+      if(!b) b={s:cur.d,e:cur.d,days:1,paid:0,casual:0}
+      else if((cur.d-b.e)/86400000===1){b.e=cur.d;b.days++}
+      else{ if(b.days>=minB) blocks.push(b); b={s:cur.d,e:cur.d,days:1,paid:0,casual:0} }
+      if(cur.type==='Paid') b.paid++
+      if(cur.type==='Casual') b.casual++
+    }
+    if(b&&b.days>=minB) blocks.push(b)
+
+    output.innerHTML=`<table><tr><th>From</th><th>To</th><th>Days Off</th><th>Casual Leaves</th><th>Paid Leaves</th></tr>`+
+      blocks.map(b=>`<tr><td>${b.s.toDateString()}</td><td>${b.e.toDateString()}</td><td>${b.days}</td><td>${b.casual}</td><td>${b.paid}</td></tr>`).join('')+`</table>`
+  }
+  reader.readAsText(file)
+}
+runBtn.onclick=run
+</script>
+</body>
+</html>
